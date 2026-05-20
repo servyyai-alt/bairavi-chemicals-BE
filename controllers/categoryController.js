@@ -2,7 +2,7 @@ const Category = require('../models/Category');
 
 exports.getCategories = async (req, res) => {
   try {
-    const query = { isActive: true };
+    const query = req.query.includeInactive === 'true' ? {} : { isActive: true };
     const categories = await Category.find(query).sort({ sortOrder: 1, name: 1 });
     res.json({ success: true, categories });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }

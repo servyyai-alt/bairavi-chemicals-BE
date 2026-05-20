@@ -27,6 +27,14 @@ const errorHandler = (err, req, res, next) => {
     error.message = Object.values(err.errors).map(e => e.message).join(', ');
     return res.status(400).json({ success: false, message: error.message });
   }
+  // Multer upload errors
+  if (err.name === 'MulterError') {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ success: false, message: 'Image is too large. Please upload a file smaller than 10 MB.' });
+    }
+
+    return res.status(400).json({ success: false, message: err.message || 'File upload failed' });
+  }
 
   res.status(statusCode).json({
     success: false,

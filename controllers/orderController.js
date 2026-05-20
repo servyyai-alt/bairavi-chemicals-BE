@@ -1,8 +1,37 @@
 const Order = require('../models/Order');
 const Cart = require('../models/Cart');
 const Product = require('../models/Product');
+const StoreSettings = require('../models/StoreSettings');
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
+
+const getDefaultVariant = (product) => product.variants?.find((variant) => variant.stock > 0) || product.variants?.[0] || null;
+const getVariantBySize = (product, selectedSize) => (
+  product.variants?.find((variant) => variant.size === selectedSize) || null
+);
+const getVariantLinePrice = (variant) => (
+  Number(variant.offerPrice || 0) > 0 && Number(variant.offerPrice) < Number(variant.price)
+    ? Number(variant.offerPrice)
+    : Number(variant.price)
+);
+const getVariantOriginalPrice = (variant) => (
+  Number(variant.offerPrice || 0) > 0 && Number(variant.offerPrice) < Number(variant.price)
+    ? Number(variant.price)
+    : 0
+);
+const shouldFinalizeOrderOnCreate = (paymentMethod) => paymentMethod !== 'razorpay';
+const getStoreSettings = async () => {
+  let settings = await StoreSettings.findOne();
+  if (!settings) {
+    settings = await StoreSettings.create({
+      gstPercentage: 18,
+      shippingCharge: 49,
+      freeShippingAbove: 499,
+      codAvailable: true
+    });
+  }
+  return settings;
+};
 
 const getRazorpayClient = () => {
   const missing = ['RAZORPAY_KEY_ID', 'RAZORPAY_KEY_SECRET'].filter((key) => !process.env[key]);
@@ -28,6 +57,7 @@ exports.createOrder = async (req, res) => {
     });
 
     const { shippingAddress, paymentMethod, notes, orderItems } = req.body;
+    const settings = await getStoreSettings();
 
     if (!shippingAddress) {
       return res.status(400).json({ success: false, message: 'Shipping address is required' });
@@ -37,7 +67,13 @@ exports.createOrder = async (req, res) => {
       return res.status(400).json({ success: false, message: 'Payment method is required' });
     }
 
+    if (paymentMethod === 'cod' && !settings.codAvailable) {
+      return res.status(400).json({ success: false, message: 'Cash on Delivery is currently unavailable' });
+    }
+
     let formattedOrderItems;
+    const reservedProducts = new Map();
+    const finalizeOnCreate = shouldFinalizeOrderOnCreate(paymentMethod);
 
     if (orderItems && orderItems.length > 0) {
       formattedOrderItems = [];
@@ -51,12 +87,30 @@ exports.createOrder = async (req, res) => {
           throw new Error(`Product not found: ${item.product}`);
         }
 
+        const variant = item.selectedSize ? getVariantBySize(product, item.selectedSize) : getDefaultVariant(product);
+        if (!variant) {
+          throw new Error(`Selected size is unavailable for product: ${product.name}`);
+        }
+
+        const quantity = Math.max(Number(variant.moq || 1), Number(item.quantity || item.qty || 1));
+
+        if (quantity > Number(variant.stock || 0)) {
+          throw new Error(`Only ${variant.stock} item(s) left for ${product.name} - ${variant.size}`);
+        }
+
+        if (finalizeOnCreate) {
+          variant.stock = Number(variant.stock || 0) - quantity;
+          reservedProducts.set(product._id.toString(), product);
+        }
+
         formattedOrderItems.push({
           product: product._id,
           name: product.name,
           image: product.images[0] || '',
-          price: product.price,
-          quantity: item.quantity || item.qty || 1
+          selectedSize: variant.size,
+          price: getVariantLinePrice(variant),
+          originalPrice: getVariantOriginalPrice(variant),
+          quantity
         });
       }
     } else {
@@ -65,15 +119,42 @@ exports.createOrder = async (req, res) => {
         return res.status(400).json({ success: false, message: 'Cart is empty' });
       }
 
-      formattedOrderItems = cart.items
-        .filter((item) => item.product != null)
-        .map((item) => ({
-          product: item.product._id,
-          name: item.product.name,
-          image: item.product.images?.[0] || '',
-          price: item.price,
+      formattedOrderItems = [];
+
+      for (const item of cart.items.filter((cartItem) => cartItem.product != null)) {
+        const product = await Product.findById(item.product._id || item.product);
+        if (!product) {
+          continue;
+        }
+
+        const variant = item.selectedSize ? getVariantBySize(product, item.selectedSize) : getDefaultVariant(product);
+        if (!variant) {
+          throw new Error(`Selected size is unavailable for product: ${product.name}`);
+        }
+
+        if (Number(item.quantity || 0) < Number(variant.moq || 1)) {
+          throw new Error(`Minimum order quantity for ${product.name} - ${variant.size} is ${variant.moq}`);
+        }
+
+        if (Number(item.quantity || 0) > Number(variant.stock || 0)) {
+          throw new Error(`Only ${variant.stock} item(s) left for ${product.name} - ${variant.size}`);
+        }
+
+        if (finalizeOnCreate) {
+          variant.stock = Number(variant.stock || 0) - Number(item.quantity || 0);
+          reservedProducts.set(product._id.toString(), product);
+        }
+
+        formattedOrderItems.push({
+          product: product._id,
+          name: product.name,
+          image: product.images?.[0] || '',
+          selectedSize: variant.size,
+          price: getVariantLinePrice(variant),
+          originalPrice: getVariantOriginalPrice(variant),
           quantity: item.quantity
-        }));
+        });
+      }
 
       if (formattedOrderItems.length === 0) {
         return res.status(400).json({ success: false, message: 'All products in cart are no longer available' });
@@ -88,8 +169,10 @@ exports.createOrder = async (req, res) => {
       itemsPrice = cart ? cart.totalAmount : 0;
     }
 
-    const shippingPrice = itemsPrice > 499 ? 0 : 49;
-    const taxPrice = Math.round(itemsPrice * 0.05);
+    const shippingPrice = itemsPrice >= Number(settings.freeShippingAbove || 0)
+      ? 0
+      : Number(settings.shippingCharge || 0);
+    const taxPrice = Math.round(itemsPrice * (Number(settings.gstPercentage || 0) / 100));
     const totalPrice = itemsPrice + shippingPrice + taxPrice;
 
     const order = await Order.create({
@@ -104,8 +187,6 @@ exports.createOrder = async (req, res) => {
       notes
     });
 
-    await Cart.findOneAndUpdate({ user: req.user._id }, { items: [], totalAmount: 0 });
-
     if (paymentMethod === 'razorpay') {
       const razorpay = getRazorpayClient();
       const razorpayOrder = await razorpay.orders.create({
@@ -113,8 +194,19 @@ exports.createOrder = async (req, res) => {
         currency: 'INR',
         receipt: order._id.toString()
       });
+      order.paymentResult = {
+        razorpay_order_id: razorpayOrder.id,
+        status: 'created'
+      };
+      await order.save();
       return res.status(201).json({ success: true, order, razorpayOrder, key: process.env.RAZORPAY_KEY_ID });
     }
+
+    await Promise.all(
+      Array.from(reservedProducts.values()).map((product) => product.save())
+    );
+
+    await Cart.findOneAndUpdate({ user: req.user._id }, { items: [], totalAmount: 0 });
 
     res.status(201).json({ success: true, order });
   } catch (err) {
@@ -138,10 +230,53 @@ exports.verifyPayment = async (req, res) => {
     if (expectedSign !== razorpay_signature) {
       return res.status(400).json({ success: false, message: 'Invalid payment signature' });
     }
-    const order = await Order.findByIdAndUpdate(orderId, {
-      isPaid: true, paidAt: Date.now(), orderStatus: 'confirmed',
-      paymentResult: { razorpay_order_id, razorpay_payment_id, razorpay_signature, status: 'paid' }
-    }, { new: true });
+
+    const order = await Order.findById(orderId);
+    if (!order) {
+      return res.status(404).json({ success: false, message: 'Order not found' });
+    }
+
+    if (order.user.toString() !== req.user._id.toString() && req.user.role !== 'admin') {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
+    if (order.isPaid) {
+      return res.json({ success: true, order });
+    }
+
+    const reservedProducts = new Map();
+
+    for (const item of order.orderItems) {
+      const product = await Product.findById(item.product);
+      if (!product) {
+        return res.status(404).json({ success: false, message: `Product not found for order item: ${item.name}` });
+      }
+
+      const variant = item.selectedSize ? getVariantBySize(product, item.selectedSize) : getDefaultVariant(product);
+      if (!variant) {
+        return res.status(400).json({ success: false, message: `Selected size is unavailable for product: ${item.name}` });
+      }
+
+      if (Number(item.quantity || 0) > Number(variant.stock || 0)) {
+        return res.status(400).json({ success: false, message: `Only ${variant.stock} item(s) left for ${item.name} - ${variant.size}` });
+      }
+
+      variant.stock = Number(variant.stock || 0) - Number(item.quantity || 0);
+      reservedProducts.set(product._id.toString(), product);
+    }
+
+    await Promise.all(
+      Array.from(reservedProducts.values()).map((product) => product.save())
+    );
+
+    order.isPaid = true;
+    order.paidAt = Date.now();
+    order.orderStatus = 'confirmed';
+    order.paymentResult = { razorpay_order_id, razorpay_payment_id, razorpay_signature, status: 'paid' };
+    await order.save();
+
+    await Cart.findOneAndUpdate({ user: req.user._id }, { items: [], totalAmount: 0 });
+
     res.json({ success: true, order });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
@@ -183,6 +318,24 @@ exports.cancelMyOrder = async (req, res) => {
     await order.save();
 
     res.json({ success: true, order, message: 'Order cancelled successfully' });
+  } catch (err) { res.status(500).json({ success: false, message: err.message }); }
+};
+
+exports.deleteMyOrder = async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.id);
+    if (!order) return res.status(404).json({ success: false, message: 'Order not found' });
+
+    if (order.user.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ success: false, message: 'Not authorized' });
+    }
+
+    if (order.orderStatus !== 'cancelled') {
+      return res.status(400).json({ success: false, message: 'Only cancelled orders can be deleted' });
+    }
+
+    await Order.findByIdAndDelete(req.params.id);
+    res.json({ success: true, message: 'Order deleted successfully' });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
 

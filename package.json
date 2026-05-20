@@ -1,12 +1,13 @@
 {
-  "name": "freshmart-backend",
+  "name": "sri-bairavi-chemicals-backend",
   "version": "1.0.0",
-  "description": "FreshMart Food E-Commerce Backend API",
+  "description": "Sri Bairavi Chemicals E-Commerce Backend API",
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
     "dev": "nodemon index.js",
-    "seed": "node seed/seedData.js"
+    "seed": "node seed/seedData.js",
+    "seed:admin": "node seed/seedAdmin.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",

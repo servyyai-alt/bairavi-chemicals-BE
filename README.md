@@ -14,9 +14,16 @@ Express + MongoDB API for the Sri Bairavi Chemicals e-commerce platform.
 ```bash
 npm install
 cp .env.example .env    # fill in all env vars
-npm run seed            # optional: seed categories & sample products
+npm run seed:admin      # create/update the admin account
 npm run dev
 ```
+
+Default admin credentials after `npm run seed:admin`:
+
+- Email: `admin@sribairavichemicals.com`
+- Password: `Admin@12345`
+
+Change `ADMIN_NAME`, `ADMIN_EMAIL`, and `ADMIN_PASSWORD` in `.env` before using this in production.
 
 ## New Chemical Fields in Product Schema
 
