@@ -8,7 +8,7 @@ const getVariantBySize = (product, selectedSize) => (
 
 exports.getCart = async (req, res) => {
   try {
-    const cart = await Cart.findOne({ user: req.user._id }).populate('items.product', 'name images price stock unit variants slug');
+    const cart = await Cart.findOne({ user: req.user._id }).populate('items.product', 'name sku images price stock unit variants slug');
     if (!cart) return res.json({ success: true, cart: { items: [], totalAmount: 0 } });
     res.json({ success: true, cart });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
@@ -63,7 +63,7 @@ exports.addToCart = async (req, res) => {
       });
     }
     await cart.save();
-    const updatedCart = await Cart.findById(cart._id).populate('items.product', 'name images price stock unit variants slug');
+    const updatedCart = await Cart.findById(cart._id).populate('items.product', 'name sku images price stock unit variants slug');
     res.json({ success: true, cart: updatedCart });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
@@ -101,7 +101,7 @@ exports.updateCartItem = async (req, res) => {
         : 0;
     }
     await cart.save();
-    const updatedCart = await Cart.findById(cart._id).populate('items.product', 'name images price stock unit variants slug');
+    const updatedCart = await Cart.findById(cart._id).populate('items.product', 'name sku images price stock unit variants slug');
     res.json({ success: true, cart: updatedCart });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
@@ -112,7 +112,7 @@ exports.removeFromCart = async (req, res) => {
     if (!cart) return res.status(404).json({ success: false, message: 'Cart not found' });
     cart.items = cart.items.filter(i => i._id.toString() !== req.params.itemId);
     await cart.save();
-    const updatedCart = await Cart.findById(cart._id).populate('items.product', 'name images price stock unit variants slug');
+    const updatedCart = await Cart.findById(cart._id).populate('items.product', 'name sku images price stock unit variants slug');
     res.json({ success: true, cart: updatedCart });
   } catch (err) { res.status(500).json({ success: false, message: err.message }); }
 };
